@@ -1,0 +1,23 @@
+{
+  "name": "angel-wings",
+  "version": "2.0.0",
+  "description": "250ms non-locking, regime-adaptive trailing profit shield for manual Polymarket & Kalshi prediction-market trades.",
+  "main": "src/guardian.js",
+  "scripts": {
+    "start": "node src/guardian.js",
+    "test": "node test/policy.test.js",
+    "scrub": "bash scrub_check.sh"
+  },
+  "keywords": [
+    "polymarket",
+    "kalshi",
+    "prediction-markets",
+    "trailing-stop",
+    "risk-management",
+    "trading-copilot"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
