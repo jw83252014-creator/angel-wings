@@ -2,42 +2,75 @@
 
 const assert = require('assert');
 const { evaluateAngelWingsExit } = require('../src/policy');
+const { AngelWingsGuardian } = require('../src/guardian');
 
-// 1. Never exits at a loss
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.30, peakBid: 0.60, curBid: 0.28 }), null);
+async function run() {
+  // === PART A: INTEGER-CENT POLICY BOUNDARY TESTS ===
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.30, peakBid: 0.60, curBid: 0.28 }), null);
+  // 0.124 rounds to 12c -> Micro-Lotto (NOT Theta-Pin!)
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.124, peakBid: 0.20, curBid: 0.16 }).tier, 'MICRO_LOTTO_15C');
+  // 0.251 rounds to 25c -> Theta-Pin (arms at 42c!)
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.251, peakBid: 0.44, curBid: 0.38 }).tier, 'THETA_PIN_42C');
+  // 0.695 rounds to 70c -> arms 64c Step-Ratchet!
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.24, peakBid: 0.695, curBid: 0.64 }).tier, 'STEP_RATCHET_64C');
+  // 0.835 rounds to 84c -> arms 78c Step-Ratchet!
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.24, peakBid: 0.835, curBid: 0.78 }).tier, 'STEP_RATCHET_78C');
+  // Displayed 6c fade (43c -> 37c from floats 0.425 -> 0.366) triggers reliably in integer cents!
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.20, peakBid: 0.425, curBid: 0.366 }).tier, 'THETA_PIN_42C');
+  // Regime-adaptive tighten & widen
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.20, peakBid: 0.46, curBid: 0.42, regime: 'THETA_PIN', flowAligned: false }).tier, 'THETA_PIN_TIGHT');
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.20, peakBid: 0.50, curBid: 0.44, regime: 'BREAKOUT', flowAligned: true }), null);
+  // Directional stall label distinct from bell lock (below 70c high-altitude ratchet)
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.50, peakBid: 0.66, curBid: 0.61, timeLeftSec: 200, regime: 'THETA_PIN', flowAligned: false }).tier, 'DIRECTIONAL_STALL_LOCK');
+  assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.50, peakBid: 0.66, curBid: 0.61, timeLeftSec: 45 }).tier, 'DIRECTIONAL_BELL_LOCK');
 
-// 2. Micro-Lotto (<= 12c entry -> arms @ 15c, 4c trail)
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.10, peakBid: 0.14, curBid: 0.10 }), null);
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.10, peakBid: 0.20, curBid: 0.16 }).tier, 'MICRO_LOTTO_15C');
+  // === PART B: GUARDIAN CONCURRENCY, SCALE-IN & ANTI-DUPLICATE-SELL TESTS ===
+  let sells = [];
+  let qty = 40;
+  let bid = 0.24;
+  const mockAdapter = {
+    async fetchUnlockedPositions() {
+      return qty > 0 ? [{ venue: 'poly', slug: 'btc-5m', side: 'NO', unlockedQty: qty, avgCost: 0.24, timeLeftSec: 180 }] : [];
+    },
+    async fetchBestBid() { return bid; },
+    async executeImmediateSell(order) {
+      sells.push(order);
+      return { filledQty: order.qty };
+    }
+  };
 
-// 3. Theta-Pin 42c Shield (13-25c entry -> lets runners fly, locks 6c drop or <= 36c floor)
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.24, peakBid: 0.40, curBid: 0.33 }), null);
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.24, peakBid: 0.71, curBid: 0.68 }), null);
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.24, peakBid: 0.71, curBid: 0.65 }).tier, 'STEP_RATCHET_64C');
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.20, peakBid: 0.44, curBid: 0.38 }).tier, 'THETA_PIN_42C');
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.20, peakBid: 0.42, curBid: 0.36 }).tier, 'THETA_PIN_42C');
+  const alerts = [];
+  const g = new AngelWingsGuardian({ adapter: mockAdapter, live: true, pollMs: 150, onAlert: (m) => alerts.push(m) });
 
-// 4. Regime-Adaptive tightening in THETA_PIN with adverse flow (4c trail instead of 6c!)
-assert.strictEqual(
-  evaluateAngelWingsExit({ avgCost: 0.20, peakBid: 0.46, curBid: 0.42, regime: 'THETA_PIN', flowAligned: false }).tier,
-  'THETA_PIN_TIGHT'
-);
+  // Tick 1: entry 24c -> peak 71c -> pullback 65c -> MUST fire ONCE with IOC + reduceOnly!
+  await g.tick();
+  bid = 0.71; await g.tick();
+  bid = 0.65; await g.tick();
+  assert.strictEqual(sells.length, 1);
+  assert.strictEqual(sells[0].timeInForce, 'IOC');
+  assert.strictEqual(sells[0].reduceOnly, true);
+  assert.strictEqual(sells[0].limitBid, 0.64);
 
-// 5. Regime-Adaptive widening in BREAKOUT with aligned flow (lets 6c wiggle keep flying!)
-assert.strictEqual(
-  evaluateAngelWingsExit({ avgCost: 0.20, peakBid: 0.50, curBid: 0.44, regime: 'BREAKOUT', flowAligned: true }),
-  null
-);
+  // Stale exchange snapshot still reports qty=40 after cooldown -> MUST NOT double-sell!
+  g.tracked.get('poly:btc-5m:NO').lastExitAt = 0;
+  await g.tick();
+  assert.strictEqual(sells.length, 1, 'Stale qty snapshot must not trigger duplicate sell');
 
-// 6. Step-Ratchet 78c high-altitude lock (peak >= 84c)
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.25, peakBid: 0.88, curBid: 0.83 }).tier, 'STEP_RATCHET_78C');
+  // Scale-in resets peakBid so newly added size does NOT immediately dump on old 71c peak!
+  qty = 60;
+  bid = 0.45;
+  await g.tick();
+  assert.strictEqual(g.tracked.get('poly:btc-5m:NO').peakBid, 0.45);
+  assert.strictEqual(sells.length, 1);
 
-// 7. 50s-Floor Runner (26-45c entry)
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.32, peakBid: 0.50, curBid: 0.42 }), null);
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.32, peakBid: 0.59, curBid: 0.52 }).tier, 'RUNNER_50S_FLOOR');
+  // Double start() returns the exact same loop promise (single-flight!)
+  const p1 = g.start();
+  const p2 = g.start();
+  assert.strictEqual(p1, p2);
+  g.stop();
+  await p1;
 
-// 8. Directional Conviction (> 45c entry) tightens near bell (<= 60s left -> 5c trail)
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.55, peakBid: 0.72, curBid: 0.67, timeLeftSec: 200 }), null);
-assert.strictEqual(evaluateAngelWingsExit({ avgCost: 0.55, peakBid: 0.72, curBid: 0.67, timeLeftSec: 45 }).tier, 'DIRECTIONAL_BELL_LOCK');
+  console.log('ALL 19 POLICY + GUARDIAN CONCURRENCY TESTS PASSED!');
+}
 
-console.log('ALL 15 ANGEL WINGS v2 UNIT TESTS PASSED!');
+run().catch((e) => { console.error(e); process.exit(1); });

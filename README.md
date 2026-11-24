@@ -26,34 +26,35 @@ Manual prediction-market traders on 5-minute, 15-minute, and 1-hour markets face
 
 ---
 
-## Adaptive Trailing Tiers (`src/policy.js`)
+## Adaptive Trailing Tiers (`src/policy.js` — Integer-Cent Exact)
+
+**Global Invariants:**
+- Every tier evaluates in **rounded integer cents** (`Math.round(px * 100)`) so thresholds and logs match 100%.
+- **Minimum Profit Trigger Gate:** Trigger bid must be `>= entry + 4¢` (note: IOC limit sells submit 1¢ under bid for immediate fill, so exchange fees/slippage apply).
+- **High-Altitude Gate:** Step-ratchet `64¢` / `78¢` locks require `peak >= entry + 12¢`.
 
 | Tier | Entry Price | Arms At | Trail / Floor | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
-| **Micro-Lotto (`0A`)** | `<= 12¢` | `>= 15¢` | `4¢` peak trail | Protects low-cost lottery bounces |
-| **Theta-Pin (`0B`)** | `13¢ – 25¢` | `>= 42¢` | `6¢` trail (`4¢` in pin stall) / `36¢` floor | Prevents 2x+ bounces from dying to `0¢` |
+| **Micro-Lotto (`0A`)** | `<= 12¢` | `>= 15¢` | `4¢` peak trail (needs `bid >= entry + 4¢`) | Protects low-cost lottery bounces |
+| **Theta-Pin (`0B`)** | `13¢ – 25¢` | `>= 42¢` | `6¢` trail / `36¢` floor (`4¢` / `38¢` in pin stall) | Prevents 2x+ bounces from dying to `0¢` |
 | **50s Runner (`0C`)** | `26¢ – 45¢` | `>= 55¢` | `6¢` trail / `52¢` floor | Ignores early chop; rides `60¢–90¢` |
-| **Step-Ratchet (`1`)** | Any | `>= 70¢` / `>= 84¢` | `64¢` / `78¢` floor lock | Locks high-altitude runners automatically |
-| **Directional (`2`)** | `> 45¢` | `entry + 15¢` | `8¢` trail (`5¢` if `<= 60s` left) | Guards conviction trades into the bell |
+| **Step-Ratchet (`1`)** | Any | `>= 70¢` / `>= 84¢` | `64¢` / `78¢` floor lock (`peak >= entry + 12¢`) | Locks high-altitude runners automatically |
+| **Directional (`2`)** | `> 45¢` | `entry + 15¢` | `8¢` trail (`5¢` if `<= 60s` left or pin stall) | Guards conviction trades into the bell |
 
 ---
 
-## Quickstart (Safe `DRY_RUN=1` Default)
+## Quickstart (Core Library & Verification)
+
+This repository ships the **auditable open-source core policy & single-flight IOC guardian engine** (`src/policy.js`, `src/guardian.js`) ready to plug into your own Polymarket US or Kalshi venue adapter.
 
 ```bash
 git clone https://github.com/jw83252014-creator/angel-wings.git
 cd angel-wings
-cp .env.example .env
-npm test          # Runs all 15 deterministic policy tests
-npm start         # Runs in safe DRY_RUN mode (zero live orders)
-```
-
-To enable live execution after wiring your trade-only venue adapter:
-```bash
-ANGEL_WINGS_LIVE=1 npm start
+npm test          # Runs all 19 policy + single-flight IOC guardian tests
+npm run scrub     # Verifies zero embedded keys or private strings
 ```
 
 ## Security & Disclaimer
-- **Non-Custodial:** Use strictly **trade-only, zero-withdrawal** API keys.
-- **Risk Tool, Not a Guarantee:** Binary prediction markets can gap rapidly through limit bids during thin liquidity or macro prints. Always test in `DRY_RUN` first.
+- **Trade-Only Keys:** Use strictly **trade-only, zero-withdrawal** API keys. Note that trade-only keys still carry order-execution authority (they can buy/sell inside your account, though they cannot withdraw funds).
+- **Risk Tool, Not a Guarantee:** Binary prediction markets can gap rapidly through IOC bids during thin liquidity or macro prints. Always test with `live: false` (`DRY_RUN`) first.
 - Licensed under [MIT](LICENSE).
